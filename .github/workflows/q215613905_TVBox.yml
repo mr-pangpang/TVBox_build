@@ -1,22 +1,24 @@
-name: q215613905_TVBox
+name: TVBox 自动化构建与发布
+# 工作流名称，显示在 GitHub Actions 页面
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:    # 允许手动触发
     inputs:
       rebuild:
-        description: 'Rebuild without release'
+        description: '仅重新构建不发布版本'
         required: false
         type: boolean
 
-env:
-  BUILD_DIR: TVBoxOSC
-  ARTIFACT_NAME: TVBox_${{ matrix.userName }}
+env:  # 全局环境变量
+  BUILD_DIR: TVBoxOSC    # 项目目录名称
+  ARTIFACT_PREFIX: TVBox # 产出物前缀
+  MAX_RETRY: 3          # 构建重试次数
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: false   # 矩阵任务独立失败
       matrix:
         include:
           - userName: q215613905
@@ -25,58 +27,139 @@ jobs:
             javaVersion: 17
 
     steps:
-      - name: Checkout Code
+      # --------------------------
+      # 阶段 1：准备环境
+      # --------------------------
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          path: ${{ env.BUILD_DIR }}
+          fetch-depth: 0  # 获取完整提交历史
+          path: ${{ env.BUILD_DIR }}  # 指定检出目录
+          ref: ${{ matrix.branchName }}
 
-      - name: Setup Build Environment
-        id: setup
+      - name: 设置构建标识
+        id: build-flag
         run: |
+          # 计算当前提交哈希
           current_commit=$(git -C ${{ env.BUILD_DIR }} rev-parse HEAD)
+          
+          # 读取上次构建记录
           last_commit=$(cat log/${{ matrix.userName }}.txt 2>/dev/null || true)
           
+          # 判断是否需要构建的条件：
+          # 1. 提交发生变化 或 2. 手动触发重建
           if [ "$current_commit" != "$last_commit" ] || ${{ inputs.rebuild }}; then
+            echo "需要构建：是"
             echo "commit=$current_commit" >> $GITHUB_ENV
             echo "commit_id=${current_commit:0:7}" >> $GITHUB_ENV
             echo "should_build=true" >> $GITHUB_ENV
+            
+            # 生成时间戳标签 (示例：2025.0411.1519)
             echo "tag=$(date +'%Y.%m%d.%H%M')" >> $GITHUB_ENV
+          else
+            echo "需要构建：否 (无新提交)"
           fi
 
-      - name: Setup Java
+      # --------------------------
+      # 阶段 2：构建准备
+      # --------------------------
+      - name: 配置 Java 环境
         if: ${{ env.should_build }}
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: temurin  # 推荐使用 Temurin JDK
           java-version: ${{ matrix.javaVersion }}
+          cache: gradle         # 启用 Gradle 缓存
 
-      - name: Build APK (with retry)
+      - name: 配置签名信息
         if: ${{ env.should_build }}
-        uses: nick-fields/retry@v3
+        working-directory: ${{ env.BUILD_DIR }}
         env:
-          GRADLE_OPTS: -Dorg.gradle.daemon=false
+          # 从 Secrets 读取签名配置（需要提前在仓库设置）
+          KEYSTORE: ${{ secrets.KEYSTORE_BASE64 }}  # Base64 编码的 JKS 文件
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          STORE_PASS: ${{ secrets.STORE_PASS }}
+          KEY_PASS: ${{ secrets.KEY_PASS }}
+        run: |
+          # 解码并写入密钥库文件
+          echo "$KEYSTORE" | base64 -d > app/TVBoxOSC.jks
+          
+          # 更新 gradle.properties
+          echo "RELEASE_STORE_FILE=./TVBoxOSC.jks" >> gradle.properties
+          echo "RELEASE_KEY_ALIAS=$KEY_ALIAS" >> gradle.properties
+          echo "RELEASE_STORE_PASSWORD=$STORE_PASS" >> gradle.properties
+          echo "RELEASE_KEY_PASSWORD=$KEY_PASS" >> gradle.properties
+
+      # --------------------------
+      # 阶段 3：构建过程
+      # --------------------------
+      - name: 执行 Gradle 构建 (含重试)
+        if: ${{ env.should_build }}
+        uses: nick-fields/retry@v3  # 添加构建重试机制
+        env:
+          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.parallel=false
         with:
-          max_attempts: 3
+          max_attempts: ${{ env.MAX_RETRY }}
           command: |
             cd ${{ env.BUILD_DIR }}
-            ./gradlew clean assembleRelease --no-daemon --no-parallel
+            ./gradlew clean assembleRelease \
+              --no-daemon \         # 禁用守护进程 (提高容器稳定性)
+              --no-parallel \       # 禁用并行任务 (避免资源冲突)
+              --stacktrace          # 显示详细错误日志
 
-      - name: Package Artifacts
+      - name: 整理产出文件
         if: ${{ env.should_build }}
+        working-directory: ${{ env.BUILD_DIR }}
         run: |
-          cd ${{ env.BUILD_DIR }}
-          zip -qr ${{ env.ARTIFACT_NAME }}_src.zip . -x ".git/*"
+          # 创建标准化输出目录
           mkdir -p artifacts/apk
-          find . -name "*.apk" -exec mv {} artifacts/apk \;
+          
+          # 移动 APK 文件并重命名
+          find . -name "*-release.apk" -exec mv {} artifacts/apk/${{ env.ARTIFACT_PREFIX }}_${GITHUB_RUN_ID}.apk \;
+          
+          # 打包源代码 (排除 Git 目录)
+          zip -qr ${{ env.ARTIFACT_PREFIX }}_${{ env.commit_id }}_src.zip . -x ".git/*"
 
-      - name: Create Release
+      # --------------------------
+      # 阶段 4：发布与清理
+      # --------------------------
+      - name: 生成更新日志
+        if: ${{ env.should_build && !inputs.rebuild }}
+        working-directory: ${{ env.BUILD_DIR }}
+        run: |
+          # 生成 Markdown 格式的变更日志
+          git log --pretty=format:"- %s (%h)" ${{ env.commit_id }}^..HEAD > Changelog.md
+          echo -e "**构建信息**\n- 提交者: ${{ github.actor }}\n- 时间: $(date)" >> Changelog.md
+
+      - name: 发布到 GitHub Releases
         if: ${{ !inputs.rebuild && env.should_build }}
         uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.token }}  # 必须使用具有 repo 权限的 PAT
+          token: ${{ secrets.TOKEN }}  # 必须使用具有 repo 权限的 PAT
           tag_name: release-${{ env.tag }}
-          body_path: ${{ env.BUILD_DIR }}/Changelog.txt
+          name: "版本 ${{ env.tag }}"
+          body_path: ${{ env.BUILD_DIR }}/Changelog.md
           files: |
             ${{ env.BUILD_DIR }}/artifacts/apk/*
-            ${{ env.BUILD_DIR }}/${{ env.ARTIFACT_NAME }}_src.zip
+            ${{ env.BUILD_DIR }}/${{ env.ARTIFACT_PREFIX }}_*.zip
+          draft: false
+          prerelease: false
+
+      - name: 更新构建记录
+        if: ${{ env.should_build }}
+        env:
+          GIT_USER: "github-actions[bot]"
+          GIT_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
+        run: |
+          # 配置 Git 身份
+          git config --global user.name "$GIT_USER"
+          git config --global user.email "$GIT_EMAIL"
+          
+          # 记录本次构建的提交哈希
+          mkdir -p log
+          echo "${{ env.commit }}" > log/${{ matrix.userName }}.txt
+          
+          # 提交并推送变更
+          git add log/
+          git commit -m "📝 更新构建记录: ${{ matrix.userName }}@${{ env.commit_id }}" || echo "无变更需要提交"
+          git push origin ${{ matrix.branchName }}
