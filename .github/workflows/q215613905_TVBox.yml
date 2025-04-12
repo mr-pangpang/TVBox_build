@@ -1,24 +1,22 @@
 name: TVBox 自动化构建与发布
-# 工作流名称，显示在 GitHub Actions 页面
-
 on:
-  workflow_dispatch:    # 允许手动触发
+  workflow_dispatch:
     inputs:
       rebuild:
         description: '仅重新构建不发布版本'
         required: false
         type: boolean
 
-env:  # 全局环境变量
-  BUILD_DIR: TVBoxOSC    # 项目目录名称
-  ARTIFACT_PREFIX: TVBox # 产出物前缀
-  MAX_RETRY: 3          # 构建重试次数
+env:
+  BUILD_DIR: TVBoxOSC
+  ARTIFACT_PREFIX: TVBox
+  MAX_RETRY: 3
 
 jobs:
   build-and-release:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false   # 矩阵任务独立失败
+      fail-fast: false
       matrix:
         include:
           - userName: q215613905
@@ -27,140 +25,143 @@ jobs:
             javaVersion: 17
 
     steps:
-      # --------------------------
-      # 阶段 1：准备环境
-      # --------------------------
+      # ====================
+      # 阶段 1：环境准备
+      # ====================
       - name: 检出代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 获取完整提交历史
-          path: ${{ env.BUILD_DIR }}  # 指定检出目录
+          fetch-depth: 0
+          path: ${{ env.BUILD_DIR }}
           ref: ${{ matrix.branchName }}
+          # 精准检出必要目录（提升检出效率）
+          sparse-checkout: |
+            ${{ env.BUILD_DIR }}
+            .github/scripts/  # JKS文件目录
+            buildSrc/        # 自定义构建模块
+            gradle/
 
       - name: 设置构建标识
         id: build-flag
         run: |
-          # 计算当前提交哈希
           current_commit=$(git -C ${{ env.BUILD_DIR }} rev-parse HEAD)
-          
-          # 读取上次构建记录
           last_commit=$(cat log/${{ matrix.userName }}.txt 2>/dev/null || true)
           
-          # 判断是否需要构建的条件：
-          # 1. 提交发生变化 或 2. 手动触发重建
-          if [ "$current_commit" != "$last_commit" ] || ${{ inputs.rebuild }}; then
-            echo "需要构建：是"
+          # 增强条件判断逻辑
+          if [ "$current_commit" != "$last_commit" ] || ${{ github.event.inputs.rebuild == 'true' }}; then
+            echo "构建标识设置..."
+            current_tag=$(date +'%Y.%m%d.%H%M')
             echo "commit=$current_commit" >> $GITHUB_ENV
             echo "commit_id=${current_commit:0:7}" >> $GITHUB_ENV
             echo "should_build=true" >> $GITHUB_ENV
-            
-            # 生成时间戳标签 (示例：2025.0411.1519)
-            echo "tag=$(date +'%Y.%m%d.%H%M')" >> $GITHUB_ENV
+            echo "tag=$current_tag" >> $GITHUB_ENV
           else
-            echo "需要构建：否 (无新提交)"
+            echo "🔄 代码无变化，跳过构建"
           fi
 
-      # --------------------------
-      # 阶段 2：构建准备
-      # --------------------------
-      - name: 配置 Java 环境
+      # ====================
+      # 阶段 2：构建配置
+      # ====================
+      - name: 配置Java环境
         if: ${{ env.should_build }}
         uses: actions/setup-java@v4
         with:
-          distribution: temurin  # 推荐使用 Temurin JDK
+          distribution: temurin
           java-version: ${{ matrix.javaVersion }}
-          cache: gradle         # 启用 Gradle 缓存
+          cache: gradle
+          # 关键修改：适配子目录的缓存路径
+          cache-dependency-path: |
+            ${{ env.BUILD_DIR }}/**/*.gradle*
+            ${{ env.BUILD_DIR }}/gradle/wrapper/gradle-wrapper.properties
+            ${{ env.BUILD_DIR }}/buildSrc/**/*.kt
 
       - name: 配置签名信息
         if: ${{ env.should_build }}
         working-directory: ${{ env.BUILD_DIR }}
-        #env:
-          # 从 Secrets 读取签名配置（需要提前在仓库设置）
-          #KEYSTORE: ${{ secrets.KEYSTORE_BASE64 }}  # Base64 编码的 JKS 文件
-          #KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          #STORE_PASS: ${{ secrets.STORE_PASS }}
-          #KEY_PASS: ${{ secrets.KEY_PASS }}
         run: |
-          # 解码并写入密钥库文件
-          #echo "$KEYSTORE" | base64 -d > app/TVBoxOSC.jks
-          cp -f ${{ github.workspace }}/.github/scripts/TVBoxOSC.jks ./app/TVBoxOSC.jks
+          # 从仓库安全位置复制密钥库
+          cp -vf "${{ github.workspace }}/.github/scripts/TVBoxOSC.jks" ./app/
           
-          # 更新 gradle.properties
-          echo "RELEASE_STORE_FILE=./TVBoxOSC.jks" >> gradle.properties
-          echo "RELEASE_KEY_ALIAS=TVBoxOSC" >> gradle.properties
-          echo "RELEASE_STORE_PASSWORD=TVBoxOSC" >> gradle.properties
-          echo "RELEASE_KEY_PASSWORD=TVBoxOSC" >> gradle.properties
+          # 使用 heredoc 方式写入配置（避免转义问题）
+          cat <<EOF >> gradle.properties
+          RELEASE_STORE_FILE=./app/TVBoxOSC.jks
+          RELEASE_KEY_ALIAS=TVBoxOSC
+          RELEASE_STORE_PASSWORD=TVBoxOSC
+          RELEASE_KEY_PASSWORD=TVBoxOSC
+          EOF
 
-      # --------------------------
-      # 阶段 3：构建过程
-      # --------------------------
-      - name: 执行 Gradle 构建 (含重试)
+      # ====================
+      # 阶段 3：构建执行
+      # ====================
+      - name: Gradle构建（含重试）
         if: ${{ env.should_build }}
-        uses: nick-fields/retry@v3  # 添加构建重试机制
+        uses: nick-fields/retry@v3
         env:
-          GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.parallel=false
+          GRADLE_OPTS: -Dorg.gradle.daemon=false
         with:
           max_attempts: ${{ env.MAX_RETRY }}
           command: |
             cd ${{ env.BUILD_DIR }}
             ./gradlew clean assembleRelease \
-              --no-daemon \         # 禁用守护进程 (提高容器稳定性)
-              --no-parallel \       # 禁用并行任务 (避免资源冲突)
-              --stacktrace          # 显示详细错误日志
+              --no-daemon \
+              --no-parallel \
+              --stacktrace \
+              --info  # 增加日志详细度
 
-      - name: 整理产出文件
+      - name: 整理构建产物
         if: ${{ env.should_build }}
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          # 创建标准化输出目录
-          mkdir -p artifacts/apk
+          # 创建分层输出目录
+          mkdir -p artifacts/{apk,source}
           
-          # 移动 APK 文件并重命名
-          find . -name "*-release.apk" -exec mv {} artifacts/apk/${{ env.ARTIFACT_PREFIX }}_${GITHUB_RUN_ID}.apk \;
+          # 查找并重命名APK文件（兼容多模块构建）
+          find . -path '*/build/outputs/apk/release/*-release.apk' \
+            -exec mv -v {} "artifacts/apk/${{ env.ARTIFACT_PREFIX }}_${{ env.tag }}.apk" \;
           
-          # 打包源代码 (排除 Git 目录)
-          zip -qr ${{ env.ARTIFACT_PREFIX }}_${{ env.commit_id }}_src.zip . -x ".git/*"
+          # 打包源代码（排除构建产物）
+          zip -qr "artifacts/source/${{ env.ARTIFACT_PREFIX }}_${{ env.commit_id }}_src.zip" . \
+            -x "build/*" "*.jks" ".git/*"
 
-      # --------------------------
-      # 阶段 4：发布与清理
-      # --------------------------
-      - name: 生成更新日志
+      # ====================
+      # 阶段 4：发布部署
+      # ====================
+      - name: 生成变更日志
         if: ${{ env.should_build && !inputs.rebuild }}
         working-directory: ${{ env.BUILD_DIR }}
         run: |
-          # 生成 Markdown 格式的变更日志
-          git log --pretty=format:"- %s (%h)" ${{ env.commit_id }}^..HEAD > Changelog.md
-          echo -e "**构建信息**\n- 提交者: ${{ github.actor }}\n- 时间: $(date)" >> Changelog.md
+          git fetch --depth=100 origin ${{ matrix.branchName }}
+          git log --pretty=format:"- %s [%h]" ${{ env.commit_id }}^..HEAD > CHANGELOG.md
+          echo -e "\n**构建元数据**\n- 构建ID: ${{ github.run_id }}" >> CHANGELOG.md
 
-      - name: 发布到 GitHub Releases
+      - name: 发布Release
         if: ${{ !inputs.rebuild && env.should_build }}
         uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.TOKEN }}  # 必须使用具有 repo 权限的 PAT
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: release-${{ env.tag }}
-          name: "版本 ${{ env.tag }}"
-          body_path: ${{ env.BUILD_DIR }}/Changelog.md
+          name: "Release ${{ env.tag }}"
+          body_path: ${{ env.BUILD_DIR }}/CHANGELOG.md
           files: |
-            ${{ env.BUILD_DIR }}/artifacts/apk/*
-            ${{ env.BUILD_DIR }}/${{ env.ARTIFACT_PREFIX }}_*.zip
+            ${{ env.BUILD_DIR }}/artifacts/apk/*.apk
+            ${{ env.BUILD_DIR }}/artifacts/source/*.zip
           draft: false
-          prerelease: false
+          prerelease: ${{ contains(github.ref, 'beta') }}
 
       - name: 更新构建记录
         if: ${{ env.should_build }}
         env:
-          GIT_USER: "github-actions[bot]"
-          GIT_EMAIL: "41898282+github-actions[bot]@users.noreply.github.com"
+          GIT_USER: "CI Bot"
+          GIT_EMAIL: "ci@tvbox.org"
         run: |
-          # 配置 Git 身份
           git config --global user.name "$GIT_USER"
           git config --global user.email "$GIT_EMAIL"
           
-          # 记录本次构建的提交哈希
+          # 原子化更新构建记录
           mkdir -p log
           echo "${{ env.commit }}" > log/${{ matrix.userName }}.txt
-          
-          # 提交并推送变更
           git add log/
-          git commit -m "📝 更新构建记录: ${{ matrix.userName }}@${{ env.commit_id }}" || echo "无变更需要提交"
-          git push origin ${{ matrix.branchName }}
+          if ! git diff-index --quiet HEAD --; then
+            git commit -m "📌 更新构建标记: ${{ matrix.userName }}@${{ env.commit_id }}"
+            git push origin ${{ matrix.branchName }}
+          fi
