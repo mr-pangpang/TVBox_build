@@ -8,7 +8,7 @@ on:
         type: boolean
 
 env:
-  BUILD_DIR: https://github.com/mr-pangpang/q215613905_TVBox  # 禁止使用斜杠开头
+  BUILD_DIR: TVBoxOSC  # 禁止使用斜杠开头
   ARTIFACT_PREFIX: TVBox-Pro
 
 jobs:
