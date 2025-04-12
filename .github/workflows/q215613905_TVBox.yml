@@ -74,7 +74,7 @@ jobs:
       - name: 配置签名信息
         if: ${{ env.should_build }}
         working-directory: ${{ env.BUILD_DIR }}
-        env:
+        #env:
           # 从 Secrets 读取签名配置（需要提前在仓库设置）
           #KEYSTORE: ${{ secrets.KEYSTORE_BASE64 }}  # Base64 编码的 JKS 文件
           #KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
