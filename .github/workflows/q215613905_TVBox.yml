@@ -76,19 +76,20 @@ jobs:
         working-directory: ${{ env.BUILD_DIR }}
         env:
           # 从 Secrets 读取签名配置（需要提前在仓库设置）
-          KEYSTORE: ${{ secrets.KEYSTORE_BASE64 }}  # Base64 编码的 JKS 文件
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          STORE_PASS: ${{ secrets.STORE_PASS }}
-          KEY_PASS: ${{ secrets.KEY_PASS }}
+          #KEYSTORE: ${{ secrets.KEYSTORE_BASE64 }}  # Base64 编码的 JKS 文件
+          #KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          #STORE_PASS: ${{ secrets.STORE_PASS }}
+          #KEY_PASS: ${{ secrets.KEY_PASS }}
         run: |
           # 解码并写入密钥库文件
-          echo "$KEYSTORE" | base64 -d > app/TVBoxOSC.jks
+          #echo "$KEYSTORE" | base64 -d > app/TVBoxOSC.jks
+          cp -f ${{ github.workspace }}/.github/scripts/TVBoxOSC.jks ./app/TVBoxOSC.jks
           
           # 更新 gradle.properties
           echo "RELEASE_STORE_FILE=./TVBoxOSC.jks" >> gradle.properties
-          echo "RELEASE_KEY_ALIAS=$KEY_ALIAS" >> gradle.properties
-          echo "RELEASE_STORE_PASSWORD=$STORE_PASS" >> gradle.properties
-          echo "RELEASE_KEY_PASSWORD=$KEY_PASS" >> gradle.properties
+          echo "RELEASE_KEY_ALIAS=TVBoxOSC" >> gradle.properties
+          echo "RELEASE_STORE_PASSWORD=TVBoxOSC" >> gradle.properties
+          echo "RELEASE_KEY_PASSWORD=TVBoxOSC" >> gradle.properties
 
       # --------------------------
       # 阶段 3：构建过程
