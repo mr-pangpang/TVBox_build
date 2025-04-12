@@ -1,14 +1,14 @@
-name: TVBox 构建流程修复版
+name: TVBox 终极构建方案
 on:
   workflow_dispatch:
     inputs:
       rebuild:
-        description: '强制重新构建'
+        description: '强制全新构建'
         required: false
         type: boolean
 
 env:
-  BUILD_DIR: TVBoxOSC  # 无需斜杠
+  BUILD_DIR: https://github.com/mr-pangpang/q215613905_TVBox  # 禁止使用斜杠开头
   ARTIFACT_PREFIX: TVBox-Pro
 
 jobs:
@@ -16,44 +16,77 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # ====================
-      # 阶段 1：正确代码检出
+      # 阶段 1：精准代码检出
       # ====================
       - name: 智能代码检出
+        id: checkout
         uses: actions/checkout@v4
         with:
           path: ${{ env.BUILD_DIR }}
           sparse-checkout: |
-            # 正确模式写法（无前导斜杠）
-            ${{ env.BUILD_DIR }}/**  # 匹配目录下所有内容
-            !.github/workflows/_archive  # 排除目录
-          fetch-depth: 100
+            # 安全路径模式（无前导斜杠）
+            ${{ env.BUILD_DIR }}/app
+            ${{ env.BUILD_DIR }}/gradle
+            ${{ env.BUILD_DIR }}/buildSrc
+            ${{ env.BUILD_DIR }}/gradle.properties
+            ${{ env.BUILD_DIR }}/build.gradle
+            ${{ env.BUILD_DIR }}/settings.gradle
+          fetch-depth: 0  # 全量提交历史
 
-      # ====================
-      # 阶段 2：路径验证
-      # ====================
-      - name: 验证检出结构
+        # 路径验证
         run: |
-          echo "当前工作目录: ${{ github.workspace }}"
-          ls -la ${{ github.workspace }}
-          
-          echo "BUILD_DIR 内容:"
+          echo "检出路径验证："
           ls -la ${{ env.BUILD_DIR }}
+          [ -f ${{ env.BUILD_DIR }}/build.gradle ] || { echo "❌ build.gradle 缺失"; exit 1; }
 
       # ====================
-      # 阶段 3：构建执行
+      # 阶段 2：路径标准化
+      # ====================
+      - name: 路径规范化处理
+        run: |
+          # 创建绝对路径引用
+          echo "BUILD_ABS_PATH=${{ github.workspace }}/${{ env.BUILD_DIR }}" >> $GITHUB_ENV
+          echo "ARTIFACT_PATH=${{ github.workspace }}/artifacts" >> $GITHUB_ENV
+          
+          # 符号链接处理（避免相对路径问题）
+          ln -sf $BUILD_ABS_PATH ${{ github.workspace }}/current_build
+          
+          # 生成路径报告
+          tree -d -L 3 $BUILD_ABS_PATH > path_report.txt
+
+      # ====================
+      # 阶段 3：安全构建
       # ====================
       - name: 执行 Gradle 构建
-        working-directory: ${{ env.BUILD_DIR }}
-        run: ./gradlew assembleRelease
+        working-directory: $BUILD_ABS_PATH
+        env:
+          GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+        run: |
+          # 清除残留锁文件
+          find ~/.gradle -name "*.lock" -delete
+          
+          # 带路径验证的构建命令
+          ./gradlew clean assembleRelease \
+            --project-dir "$BUILD_ABS_PATH" \
+            --no-daemon \
+            --stacktrace
 
       # ====================
-      # 阶段 4：产物处理
+      # 阶段 4：跨平台产物处理
       # ====================
-      - name: 整理 APK 文件
-        working-directory: ${{ env.BUILD_DIR }}
+      - name: 处理构建产物
         run: |
-          mkdir -p artifacts
-          find . -path '*/build/outputs/apk/*.apk' -exec mv {} artifacts \;
+          # 创建带时间戳的发布目录
+          RELEASE_DIR="$ARTIFACT_PATH/$(date +%Y%m%d_%H%M)"
+          mkdir -p "$RELEASE_DIR"
+          
+          # 移动 APK 文件（使用绝对路径）
+          find "$BUILD_ABS_PATH" -path "*/build/outputs/apk/*.apk" \
+            -exec mv -v {} "$RELEASE_DIR" \;
+          
+          # 生成校验文件
+          cd "$RELEASE_DIR"
+          sha256sum *.apk > checksums.sha256
 
       # ====================
       # 阶段 5：安全发布
@@ -61,4 +94,6 @@ jobs:
       - name: 发布版本
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.BUILD_DIR }}/artifacts/*.apk
+          files: |
+            $ARTIFACT_PATH/**/*.apk
+            $ARTIFACT_PATH/**/*.sha256
