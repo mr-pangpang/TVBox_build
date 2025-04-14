@@ -3,85 +3,76 @@ name: Build and Publish APK
 on:
   push:
     branches:
-      - main # 触发分支（修改为你的分支，如 main 或 master）
+      - main
+
+permissions:
+  contents: write # 允许创建 Release
 
 jobs:
   build:
-    runs-on: ubuntu-latest # 使用 Ubuntu 操作系统运行
+    runs-on: ubuntu-20.04
 
     steps:
-    # 1. 检出当前仓库代码
     - name: Checkout repository
       uses: actions/checkout@v3
 
-    # 2. 设置 JDK 11（Android 构建依赖 JDK）
     - name: Set up JDK 11
       uses: actions/setup-java@v3
       with:
         java-version: '11'
         distribution: 'zulu'
 
-    # 3. 安装 Android SDK 工具和依赖项
     - name: Install Android SDK
-      id: setup-android
       uses: android-actions/setup-android@v3
       with:
-        android-tools-version: '4.0.0' # SDK 工具版本
+        android-tools-version: '8.0.0'
         components: |
+          platforms;android-33
+          build-tools;33.0.2
           platform-tools
-          platforms;android-33 # 根据项目需求修改 API 级别
-          build-tools;33.0.2 # 根据项目需求修改版本
+          ndk;25.1.8937393
 
-    # 4. 克隆目标项目仓库（需要打包的 TVBox 项目）
     - name: Clone Target Repository
       run: git clone https://github.com/mr-pangpang/q215613905_TVBox.git
 
-    # 5. 配置签名密钥（通过 GitHub Secrets 存储敏感信息）
     - name: Configure Keystore
       run: |
         echo "storeFile=${{ secrets.KEYSTORE_FILE }}" > keystore.properties
         echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}" >> keystore.properties
         echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> keystore.properties
         echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> keystore.properties
-      shell: bash
 
-    # 6. 将签名文件复制到项目目录（假设项目在根目录）
     - name: Copy Keystore to Project
       run: |
         mkdir -p q215613905_TVBox/app
         cp keystore.properties q215613905_TVBox/app/
 
-    # 7. 配置项目环境（设置 Android SDK 路径）
     - name: Setup Project Environment
       working-directory: q215613905_TVBox
       run: |
         echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-    # 8. 构建 Release APK
     - name: Build Release APK
       working-directory: q215613905_TVBox/app
       run: ./gradlew assembleRelease
 
-    # 9. 上传 APK 为构建产物（用于调试）
     - name: Upload APK as Artifact
       uses: actions/upload-artifact@v3
       with:
         name: app-release
         path: app/build/outputs/apk/release/app-release.apk
 
-    # 10. 创建 GitHub Release
     - name: Create Release
       id: create_release
       uses: actions/create-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: "v1.0.${{ github.run_number }}" # 版本号格式
+        tag_name: "v1.0.${{ github.run_number }}"
         release_name: "Release v1.0.${{ github.run_number }}"
         draft: false
         prerelease: false
 
-    # 11. 将 APK 附加到 Release
     - name: Upload APK to Release
       uses: actions/upload-release-asset@v1
       env:
